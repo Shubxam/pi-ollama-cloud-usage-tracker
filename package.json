@@ -1,6 +1,6 @@
 {
   "name": "@entelligentsia/pi-ollama-cloud-usage-tracker",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Pi extension: live Ollama Cloud usage tracker in the footer with Claude-style quota bars",
   "keywords": [
     "pi-package",
