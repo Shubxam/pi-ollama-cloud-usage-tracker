@@ -1,11 +1,23 @@
 /**
- * Ollama Cloud usage scraper — pure TypeScript replacement for scrape_usage.py.
+ * Ollama Cloud usage scraper — cookie extraction + HTML scraping.
  *
- * Extracts Chrome cookies via @steipete/sweet-cookie, fetches the settings
- * page, and parses usage percentages + reset timestamps from the HTML.
+ * Cookie extraction strategy (tried in order):
+ *  1. @steipete/sweet-cookie (pure TS, no subprocess) — works if secret-tool/gi available
+ *  2. Python helper with browser_cookie3 — full cookie extraction, no keyring hassles
+ *  3. Python helper returns just a password — feed it back to sweet-cookie via env var
+ *
+ * The Python helper tries: gi → secret-tool → browser_cookie3.
+ * It tries multiple python interpreters (python3, python3.10, …) since
+ * browser_cookie3 may only be installed on one.
  */
 
+import { execFile } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 import { getCookies, toCookieHeader } from "@steipete/sweet-cookie";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
 // ---------------------------------------------------------------------------
 // Types
@@ -19,14 +31,118 @@ export interface UsageData {
   fetched_at: string;
 }
 
-export interface UsageError {
-  error: string;
+interface CookieResult {
+  header: string;
+  method: string;
 }
 
-export type UsageResult = UsageData | UsageError;
+interface PythonHelperResult {
+  password?: string;
+  cookies?: Record<string, string>;
+  method?: string;
+  confidence?: string;
+  error?: string;
+}
 
 // ---------------------------------------------------------------------------
-// Scrape
+// Cookie extraction
+// ---------------------------------------------------------------------------
+
+/** Try @steipete/sweet-cookie first (fast, no subprocess). */
+async function trySweetCookie(envPassword?: string): Promise<CookieResult | null> {
+  const prev = process.env.SWEET_COOKIE_CHROME_SAFE_STORAGE_PASSWORD;
+  if (envPassword) {
+    process.env.SWEET_COOKIE_CHROME_SAFE_STORAGE_PASSWORD = envPassword;
+  }
+  try {
+    const { cookies, warnings } = await getCookies({
+      url: "https://ollama.com/",
+      browsers: ["chrome"],
+    });
+    if (warnings.length > 0) {
+      console.error("[ollama-usage] sweet-cookie warnings:", warnings.join("; "));
+    }
+    const usable = cookies.filter((c) => c.value !== null && c.value !== "");
+    if (usable.length > 0) {
+      return {
+        header: toCookieHeader(cookies, { dedupeByName: true }),
+        method: envPassword ? "sweet-cookie+keyring" : "sweet-cookie",
+      };
+    }
+  } catch (err: unknown) {
+    console.error("[ollama-usage] sweet-cookie failed:", err instanceof Error ? err.message : err);
+  } finally {
+    if (envPassword) {
+      if (prev === undefined) {
+        delete process.env.SWEET_COOKIE_CHROME_SAFE_STORAGE_PASSWORD;
+      } else {
+        process.env.SWEET_COOKIE_CHROME_SAFE_STORAGE_PASSWORD = prev;
+      }
+    }
+  }
+  return null;
+}
+
+/** Build a Cookie header from a name→value map (browser_cookie3 path). */
+function buildCookieHeader(cookies: Record<string, string>): string {
+  return Object.entries(cookies)
+    .map(([name, value]) => `${name}=${value}`)
+    .join("; ");
+}
+
+/** Try multiple methods to get ollama.com cookies. */
+async function getOllamaCookies(): Promise<CookieResult | null> {
+  // 1. Try sweet-cookie directly (no subprocess)
+  const direct = await trySweetCookie();
+  if (direct) return direct;
+
+  // 2. Try Python helpers (multiple interpreters)
+  for (const pythonBin of ["python3.10", "python3.12", "python3.13", "python3"]) {
+    const pyResult = await runPythonHelper(pythonBin);
+    if (!pyResult) continue; // python not found
+
+    // Python returned full decrypted cookies — use directly
+    if (pyResult.cookies && Object.keys(pyResult.cookies).length > 0) {
+      return { header: buildCookieHeader(pyResult.cookies), method: `python-${pyResult.method}` };
+    }
+
+    // Python returned a keyring password — feed it to sweet-cookie
+    if (pyResult.password && pyResult.confidence !== "low") {
+      const retry = await trySweetCookie(pyResult.password);
+      if (retry) return retry;
+    }
+  }
+
+  console.error("[ollama-usage] No cookies available (Chrome not logged in or keyring locked)");
+  return null;
+}
+
+/** Run the Python keyring helper with a specific interpreter. */
+function runPythonHelper(pythonBin: string): Promise<PythonHelperResult | null> {
+  return new Promise((resolve) => {
+    const scriptPath = join(__dirname, "get-keyring-password.py");
+    execFile(pythonBin, [scriptPath], { timeout: 10_000, maxBuffer: 8192 }, (err, stdout) => {
+      if (err) {
+        // Python binary not found or script failed — try next
+        return resolve(null);
+      }
+      try {
+        const data = JSON.parse(stdout.trim()) as PythonHelperResult;
+        if ((data as { error?: string }).error) {
+          console.error(`[ollama-usage] ${pythonBin} helper:`, (data as { error: string }).error);
+          return resolve(null);
+        }
+        resolve(data);
+      } catch {
+        console.error(`[ollama-usage] ${pythonBin} helper: bad JSON`);
+        resolve(null);
+      }
+    });
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Main fetch
 // ---------------------------------------------------------------------------
 
 const SETTINGS_URL = "https://ollama.com/settings";
@@ -37,34 +153,18 @@ const USER_AGENT =
 /** Fetch Ollama Cloud usage from the settings dashboard. */
 export async function fetchUsage(): Promise<UsageData | null> {
   try {
-    // 1. Get Chrome cookies for ollama.com
-    const { cookies, warnings } = await getCookies({
-      url: "https://ollama.com/",
-      browsers: ["chrome"],
-    });
+    const cookieResult = await getOllamaCookies();
+    if (!cookieResult) return null;
 
-    if (warnings.length > 0) {
-      console.error("[ollama-usage] cookie warnings:", warnings.join("; "));
-    }
-
-    if (!cookies || cookies.length === 0) {
-      console.error("[ollama-usage] No Chrome cookies found for ollama.com");
-      return null;
-    }
-
-    const cookieHeader = toCookieHeader(cookies, { dedupeByName: true });
-
-    // 2. Fetch the settings page
     const resp = await fetch(SETTINGS_URL, {
       headers: {
-        Cookie: cookieHeader,
+        Cookie: cookieResult.header,
         "User-Agent": USER_AGENT,
         Accept: "text/html,application/xhtml+xml",
       },
       redirect: "manual",
     });
 
-    // Redirect likely means cookies are invalid / session expired
     if (resp.status >= 300 && resp.status < 400) {
       console.error("[ollama-usage] redirected (session expired?)");
       return null;
@@ -75,11 +175,9 @@ export async function fetchUsage(): Promise<UsageData | null> {
     }
 
     const html = await resp.text();
-
-    // 3. Parse usage data from HTML
     return parseUsageHtml(html);
   } catch (err: unknown) {
-    console.error("[ollama-usage] scraper failed:", err instanceof Error ? err.message : err);
+    console.error("[ollama-usage] fetch failed:", err instanceof Error ? err.message : err);
     return null;
   }
 }
@@ -88,57 +186,36 @@ export async function fetchUsage(): Promise<UsageData | null> {
 // HTML parser
 // ---------------------------------------------------------------------------
 
-/**
- * Parse the ollama.com/settings HTML for usage data.
- *
- * The page contains elements like:
- *   <div aria-label="Session usage 34%">...</div>
- *   <div data-time="2026-05-26T18:30:00Z">...</div>
- *   <div aria-label="Weekly usage 45%">...</div>
- *   <div data-time="2026-06-01T00:00:00Z">...</div>
- */
 function parseUsageHtml(html: string): UsageData | null {
   const result: Partial<UsageData> = {
     fetched_at: new Date().toISOString(),
   };
 
-  // Find all aria-label usage markers
-  const usagePattern =
-    /aria-label="(Session|Weekly) usage (\d+(?:\.\d+)?)%/g;
-
-  // Find all data-time timestamps (appear near usage meters)
+  const usagePattern = /aria-label="(Session|Weekly) usage (\d+(?:\.\d+)?)%/g;
   const timePattern = /data-time="([^"]+)"/g;
 
-  // Collect usage percentages
   const usages: Array<{ window: "session" | "weekly"; pct: number }> = [];
   let match: RegExpExecArray | null;
   while ((match = usagePattern.exec(html)) !== null) {
-    const window = match[1].toLowerCase() as "session" | "weekly";
-    const pct = parseFloat(match[2]);
-    usages.push({ window, pct });
+    usages.push({ window: match[1].toLowerCase() as "session" | "weekly", pct: parseFloat(match[2]) });
   }
 
-  // Collect all reset timestamps
   const timestamps: string[] = [];
   while ((match = timePattern.exec(html)) !== null) {
     timestamps.push(match[1]);
   }
 
-  // Associate percentages with their windows
   for (const { window, pct } of usages) {
-    result[`${window}_pct` as keyof UsageData] = pct as never;
+    (result as Record<string, unknown>)[`${window}_pct`] = pct;
   }
 
-  // Associate timestamps — assume order matches (session first, weekly second)
-  // and each usage meter has exactly one data-time sibling
   if (timestamps.length >= 1 && usages.some((u) => u.window === "session")) {
     result.session_resets_at = timestamps[0];
   }
   if (timestamps.length >= 2 && usages.some((u) => u.window === "weekly")) {
     result.weekly_resets_at = timestamps[1];
   }
-  // If there's only one timestamp and it belongs to weekly (no session timestamp found)
-  if (timestamps.length === 1 && !result.session_resets_at && result.weekly_pct !== undefined) {
+  if (timestamps.length === 1 && result.session_resets_at === undefined && result.weekly_pct !== undefined) {
     result.weekly_resets_at = timestamps[0];
   }
 
