@@ -1,0 +1,9 @@
+{
+  "name": "pi-ollama-cloud-usage-tracker",
+  "version": "1.0.0",
+  "description": "Pi extension: live Ollama Cloud usage tracker in the footer",
+  "keywords": ["pi-package"],
+  "pi": {
+    "extensions": ["./index.ts"]
+  }
+}
