@@ -1,34 +1,37 @@
 # pi-ollama-cloud-usage-tracker
 
-Pi extension that shows live Ollama Cloud usage in the footer status line.
-
-When the active provider is `ollama-cloud`, it displays:
+Pi extension that shows live Ollama Cloud usage in the footer status line with
+Claude-style quota bars.
 
 ```
-🟢 12.7% ↻58m · 31%/wk
+5h ▕███░░░░░░░▏ 34% ⟳ 3h14m 7d ▕████░░░░░░▏ 45% ⟳ 3d16h
 ```
 
-- **Session** (5h window): percentage used + countdown to reset
-- **Weekly** (7d window): percentage used
-- Color-coded: 🟢 under 50%, 🟡 50-80%, 🔴 over 80%
+- **5h** — session (5-hour window) percentage bar with reset countdown
+- **7d** — weekly (7-day window) percentage bar with reset countdown
+- Bar color reflects **pace** (usage% vs elapsed%): green if under budget,
+  cyan if on track, yellow/red if burning fast
+- Countdown shows time remaining until the window resets
 
 ## How it works
 
-- Scrapes `https://ollama.com/settings` using your Chrome cookies (`browser_cookie3`)
+- Extracts Chrome cookies via [`@steipete/sweet-cookie`](https://github.com/steipete/sweet-cookie) (no native addons, no Python)
+- Scrapes `https://ollama.com/settings` with those cookies
+- Parses usage percentages and reset timestamps from the dashboard HTML
 - Refreshes every 5 minutes and after each agent turn
 - Only activates when `ollama-cloud` is the active provider
 
 ## Installation
 
 ```bash
-pi install /home/boni/src/pi-ollama-cloud-usage-tracker
+pi install @entelligentsia/pi-ollama-cloud-usage-tracker
 ```
 
 Or add to `~/.pi/agent/settings.json`:
 
 ```json
 {
-  "packages": ["/home/boni/src/pi-ollama-cloud-usage-tracker"]
+  "packages": ["@entelligentsia/pi-ollama-cloud-usage-tracker"]
 }
 ```
 
@@ -36,14 +39,19 @@ Reload with `/reload` in pi.
 
 ## Requirements
 
-- Python 3.10+ with `browser-cookie3`, `requests`, `beautifulsoup4`
+- Node.js ≥ 22 (for `node:sqlite` used by `@steipete/sweet-cookie`)
 - Chrome with an active Ollama Cloud login session
 
 ## Files
 
 ```
-├── package.json       # pi package manifest
-├── index.ts           # Extension entry point
-├── scrape_usage.py    # Python usage scraper
-└── README.md
+src/
+  index.ts       # Pi extension entry point – footer rendering + events
+  scraper.ts     # Pure TS usage scraper (cookies → fetch → parse)
+package.json     # npm package manifest + pi extension config
+tsconfig.json    # TypeScript configuration
 ```
+
+## License
+
+MIT

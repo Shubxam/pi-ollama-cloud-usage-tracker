@@ -7,63 +7,18 @@
  * Footer layout (line 2, right-aligned):
  *   ↑3.4M ↓23k 8.7%/1.0M  5h ▕███░░░░░░░▏ 34% ⟳ 3h14m 7d ▕████░░░░░░▏ 45% ⟳ 3d16h  (ollama-cloud) model
  *
- * Install:  pi install /home/boni/src/pi-ollama-cloud-usage-tracker
+ * Install:  pi install @entelligentsia/pi-ollama-cloud-usage-tracker
  */
 
-import { execFile } from "node:child_process";
-import { join } from "node:path";
 import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
-import type { AssistantMessage } from "@earendil-works/pi-ai";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
-interface UsageData {
-  session_pct: number;
-  weekly_pct: number;
-  session_resets_at?: string;
-  weekly_resets_at?: string;
-  fetched_at: string;
-}
-
-interface UsageError {
-  error: string;
-}
+import { fetchUsage } from "./scraper.js";
+import type { UsageData } from "./scraper.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-/** Run the Python scraper and return parsed usage data or null on failure. */
-function fetchUsage(): Promise<UsageData | null> {
-  return new Promise((resolve) => {
-    const scriptPath = join(__dirname, "scrape_usage.py");
-    execFile(
-      "python3.10",
-      [scriptPath],
-      { timeout: 15_000, maxBuffer: 4096 },
-      (err, stdout) => {
-        if (err) {
-          console.error("[ollama-usage] scraper failed:", err.message);
-          return resolve(null);
-        }
-        try {
-          const data = JSON.parse(stdout.trim());
-          if ((data as UsageError).error) {
-            console.error("[ollama-usage]", (data as UsageError).error);
-            return resolve(null);
-          }
-          resolve(data as UsageData);
-        } catch {
-          console.error("[ollama-usage] bad JSON from scraper");
-          resolve(null);
-        }
-      },
-    );
-  });
-}
 
 /** Format a number for display: <1k raw, >=1k with k suffix. */
 function fmt(n: number): string {
@@ -95,7 +50,7 @@ export default function (pi: ExtensionAPI) {
 
   /** Build the right-side usage string with theme colors. */
   function usageText(
-    theme: { fg: (color: string, text: string) => string },
+    theme: Theme,
   ): string {
     if (!lastData) return theme.fg("dim", "5h ▕░░░░░░░░░▏ — ⟳ — 7d ▕░░░░░░░░░▏ — ⟳ —");
 
@@ -116,7 +71,7 @@ export default function (pi: ExtensionAPI) {
       const delta = pct - elapsedPct;
 
       // Color by pace (suppress if too early in window)
-      let color: string;
+      let color: Parameters<typeof theme.fg>[0];
       if (elapsedMs < 60_000 || elapsedPct < 1) {
         color = "accent"; // too early to judge pace
       } else if (delta > 5) {
@@ -166,20 +121,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   /** Start the usage tracker (called when ollama-cloud is active). */
-  function start(ctx: {
-    cwd: string;
-    model?: { provider: string; id: string } | null;
-    sessionManager: {
-      getBranch: () => Array<{
-        type: string;
-        message?: { role: string; usage: { input: number; output: number; cost: { total: number } } };
-      }>;
-    };
-    getContextUsage: () => { tokens: number; maxTokens: number; percent: number } | null;
-    ui: {
-      setFooter: (f: ((tui: unknown, theme: Theme, fd: unknown) => { dispose?: () => void; invalidate: () => void; render: (w: number) => string[] }) | undefined) => void;
-    };
-  }) {
+  function start(ctx: ExtensionContext) {
     if (active) return;
     active = true;
 
@@ -207,17 +149,16 @@ export default function (pi: ExtensionAPI) {
           let input = 0, output = 0;
           for (const e of ctx.sessionManager.getBranch()) {
             if (e.type === "message" && e.message?.role === "assistant") {
-              const m = e.message as unknown as AssistantMessage;
-              input += m.usage.input;
-              output += m.usage.output;
+              input += e.message.usage.input;
+              output += e.message.usage.output;
             }
           }
 
           // Context usage
           const ctxUsage = ctx.getContextUsage();
-          const ctxPct = ctxUsage ? `${ctxUsage.percent.toFixed(0)}%` : "—";
-          const ctxMax = (ctxUsage && typeof ctxUsage.maxTokens === "number" && !isNaN(ctxUsage.maxTokens)) 
-            ? `/${fmt(ctxUsage.maxTokens)}` 
+          const ctxPct = ctxUsage?.percent != null ? `${ctxUsage.percent.toFixed(0)}%` : "—";
+          const ctxMax = (ctxUsage && ctxUsage.tokens != null && ctxUsage.contextWindow)
+            ? `/${fmt(ctxUsage.contextWindow)}`
             : "";
 
           // Left: token stats + context
@@ -226,7 +167,8 @@ export default function (pi: ExtensionAPI) {
           // Right: usage tracker + model info
           const usage = usageText(theme);
           const modelId = ctx.model?.id || "no model";
-          const model = theme.fg("dim", `(${ctx.model?.provider || "?"}) ${modelId}`);
+          const provider = ctx.model ? ("provider" in ctx.model ? (ctx.model as { provider: string }).provider : OLLAMA_PROVIDER) : OLLAMA_PROVIDER;
+          const model = theme.fg("dim", `(${provider}) ${modelId}`);
           const right = `${usage}  ${model}`;
 
           // Layout: left ... pad ... right
@@ -245,7 +187,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   /** Stop and restore default footer. */
-  function stop(ctx: { ui: { setFooter: (f: undefined) => void } }) {
+  function stop(ctx: ExtensionContext) {
     active = false;
     if (refreshTimer) {
       clearInterval(refreshTimer);
@@ -257,7 +199,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   /** Check whether the current model uses ollama-cloud. */
-  function isOllamaCloud(ctx: { model?: { provider: string } | null }): boolean {
+  function isOllamaCloud(ctx: ExtensionContext): boolean {
     return ctx.model?.provider === OLLAMA_PROVIDER;
   }
 

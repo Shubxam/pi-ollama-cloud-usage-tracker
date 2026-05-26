@@ -1,9 +1,59 @@
 {
-  "name": "pi-ollama-cloud-usage-tracker",
+  "name": "@entelligentsia/pi-ollama-cloud-usage-tracker",
   "version": "1.0.0",
-  "description": "Pi extension: live Ollama Cloud usage tracker in the footer",
-  "keywords": ["pi-package"],
+  "description": "Pi extension: live Ollama Cloud usage tracker in the footer with Claude-style quota bars",
+  "keywords": [
+    "pi-package",
+    "ollama",
+    "ollama-cloud",
+    "usage-tracker",
+    "pi-extension"
+  ],
+  "license": "MIT",
+  "author": "Entelligentsia",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Entelligentsia/pi-ollama-cloud-usage-tracker.git"
+  },
+  "homepage": "https://github.com/Entelligentsia/pi-ollama-cloud-usage-tracker#readme",
+  "bugs": {
+    "url": "https://github.com/Entelligentsia/pi-ollama-cloud-usage-tracker/issues"
+  },
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
   "pi": {
-    "extensions": ["./index.ts"]
+    "extensions": ["./src/index.ts"]
+  },
+  "dependencies": {
+    "@steipete/sweet-cookie": "^0.3.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.1.0",
+    "@earendil-works/pi-ai": ">=0.1.0",
+    "@earendil-works/pi-tui": ">=0.1.0"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": { "optional": true },
+    "@earendil-works/pi-ai": { "optional": true },
+    "@earendil-works/pi-tui": { "optional": true }
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "latest",
+    "@earendil-works/pi-ai": "latest",
+    "@earendil-works/pi-tui": "latest",
+    "typescript": "^5.8.0"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "files": [
+    "src/",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run typecheck"
   }
 }
