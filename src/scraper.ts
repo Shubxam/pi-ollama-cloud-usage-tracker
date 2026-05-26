@@ -85,8 +85,17 @@ async function trySweetCookie(envPassword?: string): Promise<CookieResult | null
       browsers: ["chrome"],
     });
 
-    if (warnings.length > 0) {
-      console.error("[ollama-usage] sweet-cookie warnings:", warnings.join("; "));
+    // Suppress expected Linux warnings (keyring unavailable, BigInt in sqlite)
+    // — the Python fallback handles these. Only log unexpected ones.
+    const unexpected = warnings.filter(w =>
+      !w.includes("keyring") &&
+      !w.includes("secret-tool") &&
+      !w.includes("BigInt") &&
+      !w.includes("too large") &&
+      !w.includes("v11 cookies")
+    );
+    if (unexpected.length > 0) {
+      console.error("[ollama-usage] sweet-cookie warnings:", unexpected.join("; "));
     }
 
     const usable = cookies.filter((c) => c.value !== null && c.value !== "");
