@@ -13,8 +13,8 @@
 import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { fetchUsage } from "./scraper.js";
-import type { UsageData } from "./scraper.js";
+import { fetchUsage, lastCookieError } from "./scraper.js";
+import type { UsageData, CookieError } from "./scraper.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -52,7 +52,14 @@ export default function (pi: ExtensionAPI) {
   function usageText(
     theme: Theme,
   ): string {
-    if (!lastData) return theme.fg("dim", "5h ▕░░░░░░░░░▏ — ⟳ — 7d ▕░░░░░░░░░▏ — ⟳ —");
+    if (!lastData) {
+      // Show actionable error if cookie extraction failed
+      const err = lastCookieError as CookieError | null;
+      if (err) {
+        return theme.fg("error", err.error) + "  " + theme.fg("dim", err.hint);
+      }
+      return theme.fg("dim", "5h ▕░░░░░░░░░▏ — ⟳ — 7d ▕░░░░░░░░░▏ — ⟳ —");
+    }
 
     /** Render a single quota segment: label ▕███░░░░░░░▏ pct% ⟳ time */
     function renderQuota(

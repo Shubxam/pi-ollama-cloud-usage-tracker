@@ -7,8 +7,11 @@
  *  3. Python helper returns just a password — feed it back to sweet-cookie via env var
  *
  * The Python helper tries: gi → secret-tool → browser_cookie3.
- * It tries multiple python interpreters (python3, python3.10, …) since
+ * It tries multiple python interpreters (python3.10, python3, …) since
  * browser_cookie3 may only be installed on one.
+ *
+ * When nothing works, a clear error message is returned so the UI can
+ * tell the user exactly what to install.
  */
 
 import { execFile } from "node:child_process";
@@ -31,10 +34,13 @@ export interface UsageData {
   fetched_at: string;
 }
 
-interface CookieResult {
-  header: string;
-  method: string;
+/** Result when cookies could not be obtained — carries a user-facing message. */
+export interface CookieError {
+  error: string;
+  hint: string;
 }
+
+export type CookieResult = { header: string; method: string } | CookieError;
 
 interface PythonHelperResult {
   password?: string;
@@ -43,6 +49,25 @@ interface PythonHelperResult {
   confidence?: string;
   error?: string;
 }
+
+// ---------------------------------------------------------------------------
+// User-facing error messages
+// ---------------------------------------------------------------------------
+
+const ERR_NO_PYTHON: CookieError = {
+  error: "Cannot decrypt Chrome cookies",
+  hint: "Install python3-gi + gir1.2-secret-1 (apt), or: pip install browser-cookie3",
+};
+
+const ERR_NO_KEYRING: CookieError = {
+  error: "Cannot decrypt Chrome cookies",
+  hint: "Install python3-gi + gir1.2-secret-1 (apt), or: pip install browser-cookie3",
+};
+
+const ERR_NO_LOGIN: CookieError = {
+  error: "No ollama.com session",
+  hint: "Log in to ollama.com in Chrome, then /reload this session",
+};
 
 // ---------------------------------------------------------------------------
 // Cookie extraction
@@ -59,9 +84,11 @@ async function trySweetCookie(envPassword?: string): Promise<CookieResult | null
       url: "https://ollama.com/",
       browsers: ["chrome"],
     });
+
     if (warnings.length > 0) {
       console.error("[ollama-usage] sweet-cookie warnings:", warnings.join("; "));
     }
+
     const usable = cookies.filter((c) => c.value !== null && c.value !== "");
     if (usable.length > 0) {
       return {
@@ -91,30 +118,41 @@ function buildCookieHeader(cookies: Record<string, string>): string {
 }
 
 /** Try multiple methods to get ollama.com cookies. */
-async function getOllamaCookies(): Promise<CookieResult | null> {
+async function getOllamaCookies(): Promise<CookieResult> {
   // 1. Try sweet-cookie directly (no subprocess)
   const direct = await trySweetCookie();
-  if (direct) return direct;
+  if (direct && "header" in direct) return direct;
 
   // 2. Try Python helpers (multiple interpreters)
+  let anyPythonFound = false;
+  let bestPythonResult: PythonHelperResult | null = null;
+
   for (const pythonBin of ["python3.10", "python3.12", "python3.13", "python3"]) {
     const pyResult = await runPythonHelper(pythonBin);
-    if (!pyResult) continue; // python not found
+    if (pyResult === null) continue; // python binary not found
+    anyPythonFound = true;
 
     // Python returned full decrypted cookies — use directly
     if (pyResult.cookies && Object.keys(pyResult.cookies).length > 0) {
       return { header: buildCookieHeader(pyResult.cookies), method: `python-${pyResult.method}` };
     }
 
-    // Python returned a keyring password — feed it to sweet-cookie
-    if (pyResult.password && pyResult.confidence !== "low") {
-      const retry = await trySweetCookie(pyResult.password);
-      if (retry) return retry;
+    // Track the best result so far for potential sweet-cookie retry
+    if (!bestPythonResult || (pyResult.password && pyResult.confidence !== "low")) {
+      bestPythonResult = pyResult;
     }
   }
 
-  console.error("[ollama-usage] No cookies available (Chrome not logged in or keyring locked)");
-  return null;
+  // 3. If Python gave us a keyring password, feed it to sweet-cookie
+  if (bestPythonResult?.password && bestPythonResult.confidence !== "low") {
+    const retry = await trySweetCookie(bestPythonResult.password);
+    if (retry && "header" in retry) return retry;
+  }
+
+  // 4. All methods failed — return a helpful error
+  if (!anyPythonFound) return ERR_NO_PYTHON;
+  if (bestPythonResult?.method === "fallback") return ERR_NO_KEYRING;
+  return ERR_NO_LOGIN;
 }
 
 /** Run the Python keyring helper with a specific interpreter. */
@@ -123,7 +161,7 @@ function runPythonHelper(pythonBin: string): Promise<PythonHelperResult | null> 
     const scriptPath = join(__dirname, "get-keyring-password.py");
     execFile(pythonBin, [scriptPath], { timeout: 10_000, maxBuffer: 8192 }, (err, stdout) => {
       if (err) {
-        // Python binary not found or script failed — try next
+        // Python binary not found or script failed — skip silently
         return resolve(null);
       }
       try {
@@ -154,7 +192,15 @@ const USER_AGENT =
 export async function fetchUsage(): Promise<UsageData | null> {
   try {
     const cookieResult = await getOllamaCookies();
-    if (!cookieResult) return null;
+
+    // If we got an error instead of cookies, store it for the UI
+    if ("error" in cookieResult) {
+      console.error(`[ollama-usage] ${cookieResult.error} — ${cookieResult.hint}`);
+      lastCookieError = cookieResult;
+      return null;
+    }
+
+    lastCookieError = null; // clear any previous error
 
     const resp = await fetch(SETTINGS_URL, {
       headers: {
@@ -167,6 +213,7 @@ export async function fetchUsage(): Promise<UsageData | null> {
 
     if (resp.status >= 300 && resp.status < 400) {
       console.error("[ollama-usage] redirected (session expired?)");
+      lastCookieError = ERR_NO_LOGIN;
       return null;
     }
     if (!resp.ok) {
@@ -181,6 +228,9 @@ export async function fetchUsage(): Promise<UsageData | null> {
     return null;
   }
 }
+
+/** Most recent cookie extraction error, exposed for the UI. */
+export let lastCookieError: CookieError | null = null;
 
 // ---------------------------------------------------------------------------
 // HTML parser
