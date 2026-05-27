@@ -7,7 +7,7 @@
  * Footer layout (line 2, right-aligned):
  *   ↑3.4M ↓23k 8.7%/1.0M  5h ▕███░░░░░░░▏ 34% ⟳ 3h14m 7d ▕████░░░░░░▏ 45% ⟳ 3d16h  (ollama-cloud) model
  *
- * Install:  pi install @entelligentsia/pi-ollama-cloud-usage-tracker
+ * Install:  pi install npm:@entelligentsia/pi-ollama-cloud-usage-tracker
  */
 
 import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";

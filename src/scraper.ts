@@ -15,6 +15,7 @@
  */
 
 import { execFile } from "node:child_process";
+import { readdirSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { getCookies, toCookieHeader } from "@steipete/sweet-cookie";
@@ -69,34 +70,69 @@ const ERR_NO_LOGIN: CookieError = {
   hint: "Log in to ollama.com in Chrome, then /reload this session",
 };
 
+// Suppress expected warnings from sweet-cookie on Linux that are handled by
+// the Python fallback. Only log truly unexpected warnings.
+function logUnexpectedWarnings(warnings: string[]): void {
+  const unexpected = warnings.filter(w =>
+    !w.includes("keyring") &&
+    !w.includes("secret-tool") &&
+    !w.includes("BigInt") &&
+    !w.includes("too large") &&
+    !w.includes("v11 cookies")
+  );
+  if (unexpected.length > 0) {
+    console.error("[ollama-usage] sweet-cookie warnings:", unexpected.join("; "));
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Cookie extraction
 // ---------------------------------------------------------------------------
 
-/** Try @steipete/sweet-cookie first (fast, no subprocess). */
-async function trySweetCookie(envPassword?: string): Promise<CookieResult | null> {
+/**
+ * Discover Chrome profile directories that contain a Cookies database,
+ * sorted by most recently modified first so the active profile is tried first.
+ */
+function discoverChromeProfiles(): string[] {
+  const expanded = join((process.env.HOME || "/home/boni"), ".config", "google-chrome");
+  try {
+    const entries = readdirSync(expanded, { withFileTypes: true });
+    const profiles: { name: string; mtimeMs: number }[] = [];
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const cookiePath = join(expanded, entry.name, "Cookies");
+      try {
+        const stat = statSync(cookiePath);
+        profiles.push({ name: entry.name, mtimeMs: stat.mtimeMs });
+      } catch {
+        // No Cookies file in this profile
+      }
+    }
+    // Sort by most recently modified first
+    profiles.sort((a, b) => b.mtimeMs - a.mtimeMs);
+    return profiles.map((p) => p.name);
+  } catch {
+    return ["Default"];
+  }
+}
+
+/** Try @steipete/sweet-cookie with optional keyring password and profile. */
+async function trySweetCookie(envPassword?: string, profile?: string): Promise<CookieResult | null> {
   const prev = process.env.SWEET_COOKIE_CHROME_SAFE_STORAGE_PASSWORD;
   if (envPassword) {
     process.env.SWEET_COOKIE_CHROME_SAFE_STORAGE_PASSWORD = envPassword;
   }
   try {
-    const { cookies, warnings } = await getCookies({
+    const options: Parameters<typeof getCookies>[0] = {
       url: "https://ollama.com/",
       browsers: ["chrome"],
-    });
-
-    // Suppress expected Linux warnings (keyring unavailable, BigInt in sqlite)
-    // — the Python fallback handles these. Only log unexpected ones.
-    const unexpected = warnings.filter(w =>
-      !w.includes("keyring") &&
-      !w.includes("secret-tool") &&
-      !w.includes("BigInt") &&
-      !w.includes("too large") &&
-      !w.includes("v11 cookies")
-    );
-    if (unexpected.length > 0) {
-      console.error("[ollama-usage] sweet-cookie warnings:", unexpected.join("; "));
+    };
+    if (profile) {
+      options.chromeProfile = profile;
     }
+
+    const { cookies, warnings } = await getCookies(options);
+    logUnexpectedWarnings(warnings);
 
     const usable = cookies.filter((c) => c.value !== null && c.value !== "");
     if (usable.length > 0) {
@@ -106,7 +142,8 @@ async function trySweetCookie(envPassword?: string): Promise<CookieResult | null
       };
     }
   } catch (err: unknown) {
-    console.error("[ollama-usage] sweet-cookie failed:", err instanceof Error ? err.message : err);
+    // sweet-cookie errors are expected when keyring is unavailable — don't log to
+    // stderr since pi captures that and puts it in the prompt swimlane.
   } finally {
     if (envPassword) {
       if (prev === undefined) {
@@ -128,9 +165,14 @@ function buildCookieHeader(cookies: Record<string, string>): string {
 
 /** Try multiple methods to get ollama.com cookies. */
 async function getOllamaCookies(): Promise<CookieResult> {
-  // 1. Try sweet-cookie directly (no subprocess)
-  const direct = await trySweetCookie();
-  if (direct && "header" in direct) return direct;
+  // Try each Chrome profile, most recently modified first
+  const profiles = discoverChromeProfiles();
+
+  // 1. Try sweet-cookie directly (no subprocess) across all profiles
+  for (const profile of profiles) {
+    const direct = await trySweetCookie(undefined, profile);
+    if (direct && "header" in direct) return direct;
+  }
 
   // 2. Try Python helpers (multiple interpreters)
   let anyPythonFound = false;
@@ -152,10 +194,12 @@ async function getOllamaCookies(): Promise<CookieResult> {
     }
   }
 
-  // 3. If Python gave us a keyring password, feed it to sweet-cookie
+  // 3. If Python gave us a keyring password, feed it to sweet-cookie across all profiles
   if (bestPythonResult?.password && bestPythonResult.confidence !== "low") {
-    const retry = await trySweetCookie(bestPythonResult.password);
-    if (retry && "header" in retry) return retry;
+    for (const profile of profiles) {
+      const retry = await trySweetCookie(bestPythonResult.password, profile);
+      if (retry && "header" in retry) return retry;
+    }
   }
 
   // 4. All methods failed — return a helpful error
@@ -176,12 +220,12 @@ function runPythonHelper(pythonBin: string): Promise<PythonHelperResult | null> 
       try {
         const data = JSON.parse(stdout.trim()) as PythonHelperResult;
         if ((data as { error?: string }).error) {
-          console.error(`[ollama-usage] ${pythonBin} helper:`, (data as { error: string }).error);
+          // Python helper reported an error — skip silently
           return resolve(null);
         }
         resolve(data);
       } catch {
-        console.error(`[ollama-usage] ${pythonBin} helper: bad JSON`);
+        // Bad JSON from Python helper — skip silently
         resolve(null);
       }
     });
@@ -204,7 +248,6 @@ export async function fetchUsage(): Promise<UsageData | null> {
 
     // If we got an error instead of cookies, store it for the UI
     if ("error" in cookieResult) {
-      console.error(`[ollama-usage] ${cookieResult.error} — ${cookieResult.hint}`);
       lastCookieError = cookieResult;
       return null;
     }
@@ -221,19 +264,18 @@ export async function fetchUsage(): Promise<UsageData | null> {
     });
 
     if (resp.status >= 300 && resp.status < 400) {
-      console.error("[ollama-usage] redirected (session expired?)");
       lastCookieError = ERR_NO_LOGIN;
       return null;
     }
     if (!resp.ok) {
-      console.error("[ollama-usage] settings fetch failed:", resp.status);
+      lastCookieError = { error: `Settings fetch failed (HTTP ${resp.status})`, hint: "Check your network connection" };
       return null;
     }
 
     const html = await resp.text();
     return parseUsageHtml(html);
   } catch (err: unknown) {
-    console.error("[ollama-usage] fetch failed:", err instanceof Error ? err.message : err);
+    lastCookieError = { error: "Network error", hint: "Check your internet connection" };
     return null;
   }
 }
@@ -279,7 +321,7 @@ function parseUsageHtml(html: string): UsageData | null {
   }
 
   if (result.session_pct === undefined) {
-    console.error("[ollama-usage] No usage data found on page");
+    lastCookieError = { error: "No usage data on page", hint: "Check your Ollama Cloud subscription" };
     return null;
   }
 

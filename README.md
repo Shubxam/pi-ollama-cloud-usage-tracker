@@ -28,14 +28,14 @@ Claude-style quota bars.
 ## Installation
 
 ```bash
-pi install @entelligentsia/pi-ollama-cloud-usage-tracker
+pi install npm:@entelligentsia/pi-ollama-cloud-usage-tracker
 ```
 
 Or add to `~/.pi/agent/settings.json`:
 
 ```json
 {
-  "packages": ["@entelligentsia/pi-ollama-cloud-usage-tracker"]
+  "packages": ["npm:@entelligentsia/pi-ollama-cloud-usage-tracker"]
 }
 ```
 
