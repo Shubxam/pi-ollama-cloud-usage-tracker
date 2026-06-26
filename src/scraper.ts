@@ -70,15 +70,20 @@ const ERR_NO_LOGIN: CookieError = {
   hint: "Log in to ollama.com in Chrome or Firefox, then /reload this session",
 };
 
-// Suppress expected warnings from sweet-cookie on Linux that are handled by
-// the Python fallback. Only log truly unexpected warnings.
+// Suppress expected warnings from sweet-cookie that just mean a backend
+// isn't available on this machine. We try multiple backends in order
+// (Firefox first on macOS, then Chrome, then Python helpers), and the
+// "not installed" warnings for backends we don't end up using are noise.
+// Only log warnings that suggest a backend was present but failed.
 function logUnexpectedWarnings(warnings: string[]): void {
   const unexpected = warnings.filter(w =>
     !w.includes("keyring") &&
     !w.includes("secret-tool") &&
     !w.includes("BigInt") &&
     !w.includes("too large") &&
-    !w.includes("v11 cookies")
+    !w.includes("v11 cookies") &&
+    !w.includes("Chrome cookies database not found") &&
+    !w.includes("cookies database not found")
   );
   if (unexpected.length > 0) {
     console.error("[ollama-usage] sweet-cookie warnings:", unexpected.join("; "));
