@@ -115,7 +115,21 @@ export default function (pi: ExtensionAPI) {
         timeStr = theme.fg("dim", ` ⟳ ${timeStr}`);
       }
 
-      const pctStr = `${Math.round(pct)}%`;
+      // Format percent with up to 2 decimals, but only when the fractional
+      // part is non-zero — drop trailing zeros so 1% stays "1%", 0.2% stays
+      // "0.2%", and 1.25% stays "1.25%". Matches what the ollama.com
+      // dashboard shows instead of rounding everything to an integer.
+      const rounded = Math.round(pct * 100) / 100; // quantize to 2dp
+      const whole = Math.floor(rounded);
+      let pctStr: string;
+      if (Math.abs(rounded - whole) < 0.005) {
+        // Within half a hundredth of an integer — show as integer.
+        pctStr = `${whole}%`;
+      } else {
+        // Show up to 2 decimals, stripping trailing zeros (so 0.20 -> "0.2").
+        const twoDp = rounded.toFixed(2);
+        pctStr = `${twoDp.replace(/\.?0+$/, "")}%`;
+      }
       return theme.fg(color, `${label} ▕${bar}▏ ${pctStr}`) + timeStr;
     }
 
