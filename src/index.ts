@@ -5,7 +5,7 @@
  * via Chrome cookies every 5 min + after each agent turn.
  *
  * Footer layout (line 2, right-aligned):
- *   ↑3.4M ↓23k 8.7%/1.0M  5h ▕███░░░░░░░▏ 34% ⟳ 3h14m 7d ▕████░░░░░░▏ 45% ⟳ 3d16h  (ollama-cloud) model
+ *   ↑3.4M ↓23k 8.7%/1.0M  5h 34% ⟳ 3h14m 7d 45% ⟳ 3d16h  (ollama-cloud) model
  *
  * Install:  pi install npm:@entelligentsia/pi-ollama-cloud-usage-tracker
  */
@@ -58,10 +58,10 @@ export default function (pi: ExtensionAPI) {
       if (err) {
         return theme.fg("error", err.error) + "  " + theme.fg("dim", err.hint);
       }
-      return theme.fg("dim", "5h ▕░░░░░░░░░▏ — ⟳ — 7d ▕░░░░░░░░░▏ — ⟳ —");
+      return theme.fg("dim", "5h —% ⟳ — 7d —% ⟳ —");
     }
 
-    /** Render a single quota segment: label ▕███░░░░░░░▏ pct% ⟳ time */
+    /** Render a single quota segment: label pct% ⟳ time */
     function renderQuota(
       label: string,
       pct: number,
@@ -90,10 +90,6 @@ export default function (pi: ExtensionAPI) {
       } else {
         color = "accent";
       }
-
-      // Bar: 10 chars of █/░ between ▕ and ▏
-      const filled = Math.min(Math.max(Math.floor(pct / 10), 0), 10);
-      const bar = "█".repeat(filled) + "░".repeat(10 - filled);
 
       // Time until reset
       let timeStr = "";
@@ -130,7 +126,7 @@ export default function (pi: ExtensionAPI) {
         const twoDp = rounded.toFixed(2);
         pctStr = `${twoDp.replace(/\.?0+$/, "")}%`;
       }
-      return theme.fg(color, `${label} ▕${bar}▏ ${pctStr}`) + timeStr;
+      return theme.fg(color, `${label} ${pctStr}`) + timeStr;
     }
 
     // Session window: 5h (18000 sec)

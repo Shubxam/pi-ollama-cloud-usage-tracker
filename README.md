@@ -1,16 +1,17 @@
 # pi-ollama-cloud-usage-tracker
 
-Pi extension that shows live Ollama Cloud usage in the footer status line with
-Claude-style quota bars.
+Pi extension that shows live Ollama Cloud usage in the footer status line.
 
 ```
-5h ▕███░░░░░░░▏ 34% ⟳ 3h14m 7d ▕████░░░░░░▏ 45% ⟳ 3d16h
+5h 34% ⟳ 3h14m 7d 45% ⟳ 3d16h
 ```
 
-- **5h** — session (5-hour window) percentage bar with reset countdown
-- **7d** — weekly (7-day window) percentage bar with reset countdown
-- Bar color reflects **pace** (usage% vs elapsed%): green if under budget,
-  cyan if on track, yellow/red if burning fast
+- **5h** — session (5-hour window) percentage with reset countdown
+- **7d** — weekly (7-day window) percentage with reset countdown
+- Percent text color reflects **pace** (usage% vs elapsed%): green if under
+  budget, cyan if on track, yellow/red if burning fast
+- Sub-percent values are shown up to 2 decimals (e.g. `0.2%`, `1.25%`) to
+  match the ollama.com dashboard
 - Countdown shows time remaining until the window resets
 
 ## How it works
