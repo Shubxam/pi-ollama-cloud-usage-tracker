@@ -15,8 +15,10 @@ Claude-style quota bars.
 
 ## How it works
 
-1. Extracts Chrome cookies from the local cookie database using
-   [`@steipete/sweet-cookie`](https://github.com/steipete/sweet-cookie)
+1. Extracts cookies from your local browser cookie database using
+   [`@steipete/sweet-cookie`](https://github.com/steipete/sweet-cookie).
+   Tries **Firefox first** (cookies.sqlite is unencrypted, no keyring needed)
+   then falls back to **Chrome** and other Chromium-based browsers.
 2. If the Chrome cookie encryption key is locked in the system keyring,
    falls back to a tiny Python helper (`get-keyring-password.py`) that
    tries `gi` → `secret-tool` → `browser_cookie3` to unlock it
@@ -44,14 +46,28 @@ Reload with `/reload` in pi.
 ## Requirements
 
 - **Node.js** ≥ 22 (for `node:sqlite` used by sweet-cookie)
-- **Chrome** with an active Ollama Cloud login session
-- **One of** (for Linux keyring access):
+- **Firefox** or **Chrome** (or another Chromium-based browser like Helium,
+  Brave, Arc) with an active Ollama Cloud login session. Firefox is preferred
+  on macOS — its cookie database is unencrypted, so the extension works
+  without any keychain access. On Linux, Firefox also works out of the box;
+  Chromium-based browsers additionally need:
+- **One of** (for Linux Chromium keyring access):
   - `libsecret-tools` (`secret-tool` CLI) — install with `sudo apt install libsecret-tools`
   - `python3-gi` + `gir1.2-secret-1` (PyGObject) — pre-installed on most GNOME desktops
   - `browser_cookie3` (Python, uses jeepney/dbus-python) — `pip install browser-cookie3`
 
   On macOS and Windows, sweet-cookie handles keyring access natively — no extra
   packages needed.
+
+### Configuration
+
+The Firefox profile is auto-discovered under
+`~/Library/Application Support/Firefox/Profiles/` on macOS (or
+`~/.mozilla/firefox/` on Linux). To pin a specific profile, set:
+
+```bash
+export OLLAMA_USAGE_FIREFOX_PROFILE="/path/to/Firefox/Profiles/xxxxx.profile-name"
+```
 
 ## Files
 

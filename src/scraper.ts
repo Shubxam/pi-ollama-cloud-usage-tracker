@@ -56,8 +56,8 @@ interface PythonHelperResult {
 // ---------------------------------------------------------------------------
 
 const ERR_NO_PYTHON: CookieError = {
-  error: "Cannot decrypt Chrome cookies",
-  hint: "Install python3-gi + gir1.2-secret-1 (apt), or: pip install browser-cookie3",
+  error: "Cannot read browser cookies",
+  hint: "Log in to ollama.com in Chrome or Firefox, then /reload this session",
 };
 
 const ERR_NO_KEYRING: CookieError = {
@@ -67,7 +67,7 @@ const ERR_NO_KEYRING: CookieError = {
 
 const ERR_NO_LOGIN: CookieError = {
   error: "No ollama.com session",
-  hint: "Log in to ollama.com in Chrome, then /reload this session",
+  hint: "Log in to ollama.com in Chrome or Firefox, then /reload this session",
 };
 
 // Suppress expected warnings from sweet-cookie on Linux that are handled by
@@ -125,10 +125,15 @@ async function trySweetCookie(envPassword?: string, profile?: string): Promise<C
   try {
     const options: Parameters<typeof getCookies>[0] = {
       url: "https://ollama.com/",
-      browsers: ["chrome"],
+      // Try Firefox first — its cookies.sqlite is unencrypted on macOS, so it
+      // works without any keyring or Python shim. Chrome is the fallback for
+      // users who only have Chrome installed.
+      browsers: ["firefox", "chrome"],
     };
     if (profile) {
-      options.chromeProfile = profile;
+      // Firefox backend accepts a profile directory; Chrome backend accepts
+      // either a profile dir name or a full path to the user data dir.
+      options.profile = profile;
     }
 
     const { cookies, warnings } = await getCookies(options);
@@ -156,6 +161,45 @@ async function trySweetCookie(envPassword?: string, profile?: string): Promise<C
   return null;
 }
 
+/**
+ * Discover Firefox profile directories on macOS.
+ *
+ * Firefox stores cookies unencrypted in cookies.sqlite under each profile
+ * directory, so no keyring access is required — sweet-cookie's firefoxSqlite
+ * backend just opens the DB and reads it.
+ *
+ * Override the active profile via OLLAMA_USAGE_FIREFOX_PROFILE=<absolute path>.
+ * On Linux, Firefox lives under ~/.mozilla/firefox/ instead — adjust the
+ * root accordingly or rely on sweet-cookie's built-in auto-discovery.
+ */
+function discoverFirefoxProfiles(): string[] {
+  if (process.env.OLLAMA_USAGE_FIREFOX_PROFILE) {
+    return [process.env.OLLAMA_USAGE_FIREFOX_PROFILE];
+  }
+
+  const home = process.env.HOME || "";
+  const root = join(home, "Library", "Application Support", "Firefox", "Profiles");
+  try {
+    const entries = readdirSync(root, { withFileTypes: true });
+    const profiles: { name: string; mtimeMs: number }[] = [];
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const cookiePath = join(root, entry.name, "cookies.sqlite");
+      try {
+        const stat = statSync(cookiePath);
+        profiles.push({ name: entry.name, mtimeMs: stat.mtimeMs });
+      } catch {
+        // No cookies.sqlite in this profile
+      }
+    }
+    // Most recently modified first — the active profile is usually touched last.
+    profiles.sort((a, b) => b.mtimeMs - a.mtimeMs);
+    return profiles.map((p) => join(root, p.name));
+  } catch {
+    return [];
+  }
+}
+
 /** Build a Cookie header from a name→value map (browser_cookie3 path). */
 function buildCookieHeader(cookies: Record<string, string>): string {
   return Object.entries(cookies)
@@ -165,16 +209,24 @@ function buildCookieHeader(cookies: Record<string, string>): string {
 
 /** Try multiple methods to get ollama.com cookies. */
 async function getOllamaCookies(): Promise<CookieResult> {
-  // Try each Chrome profile, most recently modified first
-  const profiles = discoverChromeProfiles();
+  // 1. Try sweet-cookie against any Firefox profiles (macOS first; on Linux
+  //    sweet-cookie's own auto-discovery runs without an explicit profile).
+  //    Firefox cookies.sqlite is unencrypted so no keyring or Python shim is
+  //    needed.
+  const firefoxProfiles = discoverFirefoxProfiles();
+  for (const profile of firefoxProfiles) {
+    const direct = await trySweetCookie(undefined, profile);
+    if (direct && "header" in direct) return direct;
+  }
 
-  // 1. Try sweet-cookie directly (no subprocess) across all profiles
+  // 2. Fall back to Chrome profile discovery (covers users who only have Chrome).
+  const profiles = discoverChromeProfiles();
   for (const profile of profiles) {
     const direct = await trySweetCookie(undefined, profile);
     if (direct && "header" in direct) return direct;
   }
 
-  // 2. Try Python helpers (multiple interpreters)
+  // 3. Try Python helpers (multiple interpreters) — Linux-only fallback.
   let anyPythonFound = false;
   let bestPythonResult: PythonHelperResult | null = null;
 
@@ -194,7 +246,7 @@ async function getOllamaCookies(): Promise<CookieResult> {
     }
   }
 
-  // 3. If Python gave us a keyring password, feed it to sweet-cookie across all profiles
+  // 4. If Python gave us a keyring password, feed it to sweet-cookie against Chrome profiles.
   if (bestPythonResult?.password && bestPythonResult.confidence !== "low") {
     for (const profile of profiles) {
       const retry = await trySweetCookie(bestPythonResult.password, profile);
@@ -202,7 +254,7 @@ async function getOllamaCookies(): Promise<CookieResult> {
     }
   }
 
-  // 4. All methods failed — return a helpful error
+  // 5. All methods failed — return a helpful error
   if (!anyPythonFound) return ERR_NO_PYTHON;
   if (bestPythonResult?.method === "fallback") return ERR_NO_KEYRING;
   return ERR_NO_LOGIN;
